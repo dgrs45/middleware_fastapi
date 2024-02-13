@@ -1,9 +1,9 @@
-from fastapi import HTTPException,Security,status,FastAPI
+from fastapi import HTTPException,Security,status,FastAPI,Request
 from fastapi.security import APIKeyHeader, APIKeyQuery
 from langchain_community.llms import LlamaCpp
-import requests
-from fastapi import Request
 from pydantic import BaseModel
+from token_bucket import TokenBucket
+from starlette.middleware.base import BaseHTTPMiddleware
 
 class PostData(BaseModel):
    prompt:str
@@ -22,7 +22,7 @@ class llm:
     n_ctx=2048,
     top_p=0.1,
     n_gpu_layers = 10,
-    repetition_penalty=1.77)
+    )
     return self.llm 
  
  def make_inference(self):
@@ -32,11 +32,22 @@ class llm:
     print(response)
     return response
 
-  
+app = FastAPI()
 API_KEYS = ["ABC-123-DG"]
-
 api_key_query = APIKeyQuery(name="api-key",auto_error=False)
 api_key_header = APIKeyHeader(name="auth_key",auto_error=False)
+
+
+
+class RateLimiterMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, bucket: TokenBucket):
+        super().__init__(app)
+        self.bucket = bucket
+
+    async def dispatch(self, request: Request, call_next):
+        if self.bucket.take_token():
+            return await call_next(request)
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
 
 def get_api_key(api_key_query:str=Security(api_key_query),
                 api_key_header:str =Security(api_key_header)) -> str:
@@ -50,14 +61,19 @@ def get_api_key(api_key_query:str=Security(api_key_query),
         detail="API-KEY not valid or not provided."
     )
 
+# refilling capacity to be adjusted as per the time taken to process the inference
+bucket = TokenBucket(capacity=4, refill_rate=0.5)
+# Add the rate limiting middleware to the FastAPI app
+app.add_middleware(RateLimiterMiddleware, bucket=bucket)
 
-app = FastAPI()
 
-# return llm object 
 
 @app.post('/return_llm_object')
 async def return_object(item:PostData,api_key:str = Security(get_api_key)):
     params = {}
     params['prompt'] = item.prompt
-    object_llm =  llm(params).make_inference()
-    return object_llm
+    if(item.make_inference):
+        object_llm =  llm(params).make_inference()
+        return object_llm
+    else:
+       return "Authorized"
